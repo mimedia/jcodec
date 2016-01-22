@@ -1,11 +1,5 @@
 package org.jcodec.codecs.h264.decode;
 
-import static org.jcodec.codecs.h264.H264Utils.unescapeNAL;
-
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.List;
-
 import org.jcodec.codecs.common.biari.MDecoder;
 import org.jcodec.codecs.h264.decode.aso.MapManager;
 import org.jcodec.codecs.h264.decode.aso.Mapper;
@@ -19,47 +13,56 @@ import org.jcodec.common.IntObjectMap;
 import org.jcodec.common.io.BitReader;
 import org.jcodec.common.logging.Logger;
 
+import java.nio.ByteBuffer;
+import java.util.LinkedList;
+import java.util.List;
+
+import static org.jcodec.codecs.h264.H264Utils.unescapeNAL;
+
 /**
  * This class is part of JCodec ( www.jcodec.org ) This software is distributed
  * under FreeBSD License
- * 
+ *
  * MPEG 4 AVC ( H.264 ) Frame reader
- * 
+ *
  * Conforms to H.264 ( ISO/IEC 14496-10 ) specifications
- * 
+ *
  * @author The JCodec project
- * 
+ *
  */
 public class FrameReader {
-    private IntObjectMap<SeqParameterSet> sps = new IntObjectMap<SeqParameterSet>();
-    private IntObjectMap<PictureParameterSet> pps = new IntObjectMap<PictureParameterSet>();
+    private IntObjectMap<SeqParameterSet> sps = new IntObjectMap<>();
+    private IntObjectMap<PictureParameterSet> pps = new IntObjectMap<>();
 
-    public List<SliceReader> readFrame(List<ByteBuffer> nalUnits) {
-        List<SliceReader> result = new ArrayList<SliceReader>();
-
+    public List<SliceReader> readFrame(final List<ByteBuffer> nalUnits) {
+        final List<SliceReader> result = new LinkedList<>();
         for (ByteBuffer nalData : nalUnits) {
             NALUnit nalUnit = NALUnit.read(nalData);
-
             unescapeNAL(nalData);
 
-            switch (nalUnit.type) {
-            case NON_IDR_SLICE:
-            case IDR_SLICE:
-                if (sps.size() == 0 || pps.size() == 0) {
-                    Logger.warn("Skipping frame as no SPS/PPS have been seen so far...");
-                    return null;
+            if (nalUnit.type != null) {
+                Logger.debug(String.format("nalUnit.type = %s", nalUnit.type.getName()));
+                switch (nalUnit.type) {
+                    case NON_IDR_SLICE:
+                    case IDR_SLICE:
+                        if (sps.size() == 0 || pps.size() == 0) {
+                            Logger.warn("Skipping frame as no SPS/PPS have been seen so far...");
+                        } else {
+                            result.add(createSliceReader(nalData, nalUnit));
+                        }
+                        break;
+                    case SPS:
+                        SeqParameterSet _sps = SeqParameterSet.read(nalData);
+                        sps.put(_sps.seq_parameter_set_id, _sps);
+                        break;
+                    case PPS:
+                        PictureParameterSet _pps = PictureParameterSet.read(nalData);
+                        pps.put(_pps.pic_parameter_set_id, _pps);
+                        break;
+                    default:
                 }
-                result.add(createSliceReader(nalData, nalUnit));
-                break;
-            case SPS:
-                SeqParameterSet _sps = SeqParameterSet.read(nalData);
-                sps.put(_sps.seq_parameter_set_id, _sps);
-                break;
-            case PPS:
-                PictureParameterSet _pps = PictureParameterSet.read(nalData);
-                pps.put(_pps.pic_parameter_set_id, _pps);
-                break;
-            default:
+            } else {
+                Logger.warn("NAL unit type is null");
             }
         }
 
@@ -93,7 +96,7 @@ public class FrameReader {
 
         return new SliceReader(sh.pps, cabac, cavlc, mDecoder, in, mapper, sh, nalUnit);
     }
-    
+
     public void addSps(List<ByteBuffer> spsList) {
         for (ByteBuffer byteBuffer : spsList) {
             ByteBuffer dup = byteBuffer.duplicate();

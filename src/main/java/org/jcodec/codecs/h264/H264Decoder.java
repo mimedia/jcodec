@@ -1,33 +1,8 @@
 package org.jcodec.codecs.h264;
 
-import static org.jcodec.codecs.h264.H264Utils.getPicHeightInMbs;
-import static org.jcodec.common.tools.MathUtil.wrap;
-
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.ThreadFactory;
-
-import org.jcodec.codecs.h264.decode.DeblockerInput;
-import org.jcodec.codecs.h264.decode.FrameReader;
-import org.jcodec.codecs.h264.decode.MBlockDecoderUtils;
-import org.jcodec.codecs.h264.decode.SliceDecoder;
-import org.jcodec.codecs.h264.decode.SliceHeaderReader;
-import org.jcodec.codecs.h264.decode.SliceReader;
+import org.jcodec.codecs.h264.decode.*;
 import org.jcodec.codecs.h264.decode.deblock.DeblockingFilter;
-import org.jcodec.codecs.h264.io.model.Frame;
-import org.jcodec.codecs.h264.io.model.NALUnit;
-import org.jcodec.codecs.h264.io.model.NALUnitType;
-import org.jcodec.codecs.h264.io.model.PictureParameterSet;
-import org.jcodec.codecs.h264.io.model.RefPicMarking;
-import org.jcodec.codecs.h264.io.model.RefPicMarkingIDR;
-import org.jcodec.codecs.h264.io.model.SeqParameterSet;
-import org.jcodec.codecs.h264.io.model.SliceHeader;
-import org.jcodec.codecs.h264.io.model.SliceType;
+import org.jcodec.codecs.h264.io.model.*;
 import org.jcodec.common.ArrayUtil;
 import org.jcodec.common.IntObjectMap;
 import org.jcodec.common.VideoDecoder;
@@ -36,16 +11,25 @@ import org.jcodec.common.model.ColorSpace;
 import org.jcodec.common.model.Picture;
 import org.jcodec.common.model.Rect;
 
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.concurrent.*;
+
+import static org.jcodec.codecs.h264.H264Utils.getPicHeightInMbs;
+import static org.jcodec.common.tools.MathUtil.wrap;
+
 /**
  * This class is part of JCodec ( www.jcodec.org ) This software is distributed
  * under FreeBSD License
- * 
+ *
  * MPEG 4 AVC ( H.264 ) Decoder
- * 
+ *
  * Conforms to H.264 ( ISO/IEC 14496-10 ) specifications
- * 
+ *
  * @author The JCodec project
- * 
+ *
  */
 public class H264Decoder implements VideoDecoder {
 
@@ -63,7 +47,7 @@ public class H264Decoder implements VideoDecoder {
     }
 
     public H264Decoder(boolean threaded) {
-        pictureBuffer = new ArrayList<Frame>();
+        pictureBuffer = new LinkedList<>();
         poc = new POCManager();
         this.threaded = threaded && Runtime.getRuntime().availableProcessors() > 1;
         if (threaded) {
@@ -106,7 +90,7 @@ public class H264Decoder implements VideoDecoder {
         return new FrameDecoder().decodeFrame(nalUnits, buffer);
     }
 
-    class FrameDecoder {
+    public class FrameDecoder {
         private SeqParameterSet activeSps;
         private DeblockingFilter filter;
         private SliceHeader firstSliceHeader;
@@ -114,12 +98,11 @@ public class H264Decoder implements VideoDecoder {
         private DeblockerInput di;
 
         public Frame decodeFrame(List<ByteBuffer> nalUnits, byte[][] buffer) {
-            List<SliceReader> sliceReaders = reader.readFrame(nalUnits);
-            if (sliceReaders == null || sliceReaders.size() == 0)
-                return null;
+            final List<SliceReader> sliceReaders = reader.readFrame(nalUnits);
+            if (sliceReaders == null || sliceReaders.isEmpty()) return null;
             final Frame result = init(sliceReaders.get(0), buffer);
             if (threaded && sliceReaders.size() > 1) {
-                List<Future<?>> futures = new ArrayList<Future<?>>();
+                final List<Future<?>> futures = new LinkedList<>();
                 for (final SliceReader sliceReader : sliceReaders) {
                     futures.add(tp.submit(new Runnable() {
                         public void run() {
@@ -128,7 +111,7 @@ public class H264Decoder implements VideoDecoder {
                     }));
                 }
 
-                for (Future<?> future : futures) {
+                for (final Future<?> future : futures) {
                     waitForSure(future);
                 }
 
@@ -139,21 +122,16 @@ public class H264Decoder implements VideoDecoder {
             }
 
             filter.deblockFrame(result);
-
             updateReferences(result);
 
             return result;
         }
 
         private void waitForSure(Future<?> future) {
-            while (true) {
-                try {
-                    future.get();
-                    break;
-                } catch (InterruptedException e) {
-                } catch (ExecutionException e) {
-                    throw new RuntimeException(e);
-                }
+            try {
+                future.get();
+            } catch (InterruptedException | ExecutionException e) {
+                throw new RuntimeException(e);
             }
         }
 
@@ -176,7 +154,7 @@ public class H264Decoder implements VideoDecoder {
 
             if (sRefs == null) {
                 sRefs = new Frame[1 << (firstSliceHeader.sps.log2_max_frame_num_minus4 + 4)];
-                lRefs = new IntObjectMap<Frame>();
+                lRefs = new IntObjectMap<>();
             }
 
             di = new DeblockerInput(activeSps);
@@ -231,24 +209,24 @@ public class H264Decoder implements VideoDecoder {
             if (refPicMarking != null) {
                 for (RefPicMarking.Instruction instr : refPicMarking.getInstructions()) {
                     switch (instr.getType()) {
-                    case REMOVE_SHORT:
-                        unrefShortTerm(instr.getArg1());
-                        break;
-                    case REMOVE_LONG:
-                        unrefLongTerm(instr.getArg1());
-                        break;
-                    case CONVERT_INTO_LONG:
-                        convert(instr.getArg1(), instr.getArg2());
-                        break;
-                    case TRUNK_LONG:
-                        truncateLongTerm(instr.getArg1() - 1);
-                        break;
-                    case CLEAR:
-                        clearAll();
-                        break;
-                    case MARK_LONG:
-                        saveLong(saved, instr.getArg1());
-                        saved = null;
+                        case REMOVE_SHORT:
+                            unrefShortTerm(instr.getArg1());
+                            break;
+                        case REMOVE_LONG:
+                            unrefLongTerm(instr.getArg1());
+                            break;
+                        case CONVERT_INTO_LONG:
+                            convert(instr.getArg1(), instr.getArg2());
+                            break;
+                        case TRUNK_LONG:
+                            truncateLongTerm(instr.getArg1() - 1);
+                            break;
+                        case CLEAR:
+                            clearAll();
+                            break;
+                        case MARK_LONG:
+                            saveLong(saved, instr.getArg1());
+                            saved = null;
                     }
                 }
             }
@@ -259,12 +237,12 @@ public class H264Decoder implements VideoDecoder {
             if (refPicMarking == null) {
                 int maxShort = Math.max(1, activeSps.num_ref_frames - lRefs.size());
                 int min = Integer.MAX_VALUE, num = 0, minFn = 0;
-                for (int i = 0; i < sRefs.length; i++) {
-                    if (sRefs[i] != null) {
-                        int fnWrap = unwrap(firstSliceHeader.frame_num, sRefs[i].getFrameNo(), maxFrames);
+                for (Frame sRef : sRefs) {
+                    if (sRef != null) {
+                        int fnWrap = unwrap(firstSliceHeader.frame_num, sRef.getFrameNo(), maxFrames);
                         if (fnWrap < min) {
                             min = fnWrap;
-                            minFn = sRefs[i].getFrameNo();
+                            minFn = sRef.getFrameNo();
                         }
                         num++;
                     }
@@ -295,10 +273,10 @@ public class H264Decoder implements VideoDecoder {
 
         private void truncateLongTerm(int maxLongNo) {
             int[] keys = lRefs.keys();
-            for (int i = 0; i < keys.length; i++) {
-                if (keys[i] > maxLongNo) {
-                    releaseRef(lRefs.get(keys[i]));
-                    lRefs.remove(keys[i]);
+            for (int key : keys) {
+                if (key > maxLongNo) {
+                    releaseRef(lRefs.get(key));
+                    lRefs.remove(key);
                 }
             }
         }
@@ -325,8 +303,8 @@ public class H264Decoder implements VideoDecoder {
         }
     }
 
-    public static Frame createFrame(SeqParameterSet sps, byte[][] buffer, int frameNum, SliceType frameType,
-            int[][][][] mvs, Frame[][][] refsUsed, int POC) {
+    private static Frame createFrame(SeqParameterSet sps, byte[][] buffer, int frameNum, SliceType frameType,
+                                     int[][][][] mvs, Frame[][][] refsUsed, int POC) {
         int width = sps.pic_width_in_mbs_minus1 + 1 << 4;
         int height = getPicHeightInMbs(sps) << 4;
 
